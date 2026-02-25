@@ -1,0 +1,3 @@
+echo -n hello > output2.txt
+cat output2.txt
+exit

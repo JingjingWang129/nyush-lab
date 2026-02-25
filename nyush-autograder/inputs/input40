@@ -1,0 +1,3 @@
+cat - input.txt < input.txt | sort | uniq > output8.txt
+cat output8.txt
+exit

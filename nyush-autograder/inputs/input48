@@ -1,0 +1,7 @@
+./print_numbers_stopped 1
+./print_numbers_stopped 2
+jobs
+fg 1
+jobs
+fg 1
+exit

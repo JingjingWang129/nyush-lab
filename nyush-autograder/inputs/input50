@@ -1,0 +1,15 @@
+./print_numbers_stopped 1
+./print_numbers_stopped 2 4
+./print_numbers_stopped 3
+jobs
+fg 2
+exit
+jobs
+fg 1
+exit
+jobs
+fg 2
+exit
+jobs
+fg 1
+exit

@@ -1,0 +1,3 @@
+cat input.txt | sort > output5.txt
+cat output5.txt
+exit

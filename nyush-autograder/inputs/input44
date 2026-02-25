@@ -1,0 +1,4 @@
+./print_numbers_stopped 1 2
+fg 1
+fg 1
+exit

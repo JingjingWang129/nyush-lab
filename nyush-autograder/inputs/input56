@@ -1,0 +1,3 @@
+cd subdir
+../print_args subdir
+exit

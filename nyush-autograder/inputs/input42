@@ -1,0 +1,5 @@
+./print_numbers_stopped 4
+jobs
+fg 1
+fg 1
+exit

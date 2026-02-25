@@ -1,0 +1,2 @@
+killall -SIGINT nyush
+exit

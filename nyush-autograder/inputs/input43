@@ -1,0 +1,6 @@
+./print_numbers_stopped 1 > output.txt
+cat output.txt
+jobs
+fg 1
+cat output.txt
+exit

@@ -1,0 +1,3 @@
+cat - input.txt < input.txt > output3.txt
+cat output3.txt
+exit
