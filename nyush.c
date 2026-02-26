@@ -8,6 +8,8 @@
 #include <errno.h>
 #include <limits.h>
 
+static int suspended_jobs = 0;
+
 static void shell_ignore_signals(void) {
     signal(SIGINT, SIG_IGN);
     signal(SIGQUIT, SIG_IGN);
@@ -107,6 +109,37 @@ int main(void) {
             free(argv);
             free(line_copy);
             continue;
+        }
+
+        if (strcmp(argv[0], "cd") == 0) {
+            if (argc != 2) {
+                fprintf(stderr, "Error: invalid command\n");
+            } else {
+                if (chdir(argv[1]) != 0) {
+                    fprintf(stderr, "Error: invalid directory\n");
+                }
+            }
+            free(argv);
+            free(line_copy);
+            continue;
+        }
+
+        if (strcmp(argv[0], "exit") == 0) {
+            if (argc != 1) {
+                fprintf(stderr, "Error: invalid command\n");
+                free(argv);
+                free(line_copy);
+                continue;
+            }
+            if (suspended_jobs > 0) {
+                fprintf(stderr, "Error: there are suspended jobs\n");
+                free(argv);
+                free(line_copy);
+                continue;
+            }
+            free(argv);
+            free(line_copy);
+            break;
         }
 
         char *prog = resolve_program(argv[0]);
