@@ -103,6 +103,39 @@ static char **split_argv(char *line, int *argc_out)
     return argv;
 }
 
+static int parse_redirections(char **argv, int *argc, int *redirect_in, char **infile, int *redirect_out, int *append, char **outfile)
+{
+    int w = 0;
+    for (int r = 0; r < *argc; r++)
+    {
+        if (strcmp(argv[r], "<") == 0)
+        {
+            if (*redirect_in || r + 1 >= *argc)
+                return -1;
+            *redirect_in = 1;
+            *infile = argv[r + 1];
+            r++;
+            continue;
+        }
+        if (strcmp(argv[r], ">") == 0 || strcmp(argv[r], ">>") == 0)
+        {
+            if (*redirect_out || r + 1 >= *argc)
+                return -1;
+            *redirect_out = 1;
+            *append = (strcmp(argv[r], ">>") == 0);
+            *outfile = argv[r + 1];
+            r++;
+            continue;
+        }
+        argv[w++] = argv[r];
+    }
+    argv[w] = NULL;
+    *argc = w;
+    if (*argc == 0)
+        return -1;
+    return 0;
+}
+
 int main(void)
 {
     shell_ignore_signals();
@@ -182,40 +215,12 @@ int main(void)
             break;
         }
 
-        for (int i = 0; i < argc; i++)
+        if (parse_redirections(argv, &argc, &redirect_in, &infile, &redirect_out, &append, &outfile) < 0)
         {
-            if (strcmp(argv[i], ">") == 0 || strcmp(argv[i], ">>") == 0)
-            {
-                if (redirect_out || i + 1 >= argc)
-                {
-                    fprintf(stderr, "Error: invalid command\n");
-                    free(argv);
-                    free(line_copy);
-                    continue;
-                }
-                redirect_out = 1;
-                append = (strcmp(argv[i], ">>") == 0);
-                outfile = argv[i + 1];
-                argv[i] = NULL;
-                argc = i;
-                break;
-            }
-
-            if (strcmp(argv[i], "<") == 0)
-            {
-                if (redirect_in || i + 1 >= argc)
-                {
-                    fprintf(stderr, "Error: invalid command\n");
-                    free(argv);
-                    free(line_copy);
-                    continue;
-                }
-                redirect_in = 1;
-                infile = argv[i + 1];
-                argv[i] = NULL;
-                argc = i;
-                break;
-            }
+            fprintf(stderr, "Error: invalid command\n");
+            free(argv);
+            free(line_copy);
+            continue;
         }
 
         char *prog = resolve_program(argv[0]);
