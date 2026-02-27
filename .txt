@@ -1,6 +1,0 @@
-Makefile
-a.txt
-nyush
-nyush-autograder
-nyush.c
-nyush.o
