@@ -58,6 +58,8 @@ static void shell_ignore_signals(void)
     signal(SIGINT, SIG_IGN);
     signal(SIGQUIT, SIG_IGN);
     signal(SIGTSTP, SIG_IGN);
+    signal(SIGTTIN, SIG_IGN);
+    signal(SIGTTOU, SIG_IGN);
 }
 
 static void child_restore_signals(void)
@@ -733,5 +735,6 @@ int main(void)
     }
 
     free(line);
+    // fprintf(stderr, "DEBUG: Command finished, looping back...\n");
     return 0;
 }
