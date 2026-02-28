@@ -12,6 +12,47 @@
 
 static int suspended_jobs = 0;
 
+typedef struct
+{
+    int jid;
+    pid_t pgid; // process group id
+    char *cmdline;
+} job_t;
+
+static job_t jobs[128];
+static int jobs_n = 0;
+static int next_jid = 1;
+
+static int add_job(pid_t pgid, const char *cmdline)
+{
+    if (jobs_n >= 128)
+        return -1;
+    jobs[jobs_n].jid = next_jid++;
+    jobs[jobs_n].pgid = pgid;
+    jobs[jobs_n].cmdline = strdup(cmdline ? cmdline : "");
+    jobs_n++;
+    suspended_jobs = jobs_n;
+    return jobs[jobs_n - 1].jid;
+}
+
+static int find_job_index(int jid)
+{
+    for (int i = 0; i < jobs_n; i++)
+        if (jobs[i].jid == jid)
+            return i;
+    return -1;
+}
+
+static void remove_job_index(int idx)
+{
+    if (idx < 0 || idx >= jobs_n)
+        return;
+    free(jobs[idx].cmdline);
+    jobs[idx] = jobs[jobs_n - 1];
+    jobs_n--;
+    suspended_jobs = jobs_n;
+}
+
 static void shell_ignore_signals(void)
 {
     signal(SIGINT, SIG_IGN);
@@ -142,10 +183,11 @@ static int is_builtin(const char *s)
 }
 
 static void run_pipeline(char ***argvs, int ncmd, int redirect_in, char *infile,
-                         int redirect_out, int append, char *outfile)
+                         int redirect_out, int append, char *outfile, const char *cmdline)
 {
-    pid_t pids[512];
+    pid_t pgid = -1;
     int prev_read = -1;
+    pid_t shell_pgid = getpgrp();
 
     for (int i = 0; i < ncmd; i++)
     {
@@ -155,6 +197,8 @@ static void run_pipeline(char ***argvs, int ncmd, int redirect_in, char *infile,
             if (pipe(pfd) < 0)
             {
                 fprintf(stderr, "Error: invalid program\n");
+                if (prev_read != -1)
+                    close(prev_read);
                 return;
             }
         }
@@ -163,6 +207,10 @@ static void run_pipeline(char ***argvs, int ncmd, int redirect_in, char *infile,
         if (pid < 0)
         {
             fprintf(stderr, "Error: invalid program\n");
+            if (prev_read != -1)
+            {
+                close(prev_read);
+            }
             if (pfd[0] != -1)
             {
                 close(pfd[0]);
@@ -173,7 +221,17 @@ static void run_pipeline(char ***argvs, int ncmd, int redirect_in, char *infile,
 
         if (pid == 0)
         {
+            // child
             child_restore_signals();
+
+            if (pgid == -1)
+            {
+                setpgid(0, 0);
+            }
+            else
+            {
+                setpgid(0, pgid);
+            }
 
             // stdin
             if (i == 0 && redirect_in)
@@ -213,7 +271,6 @@ static void run_pipeline(char ***argvs, int ncmd, int redirect_in, char *infile,
                 dup2(pfd[1], STDOUT_FILENO);
             }
 
-            // child
             if (prev_read != -1)
                 close(prev_read);
             if (pfd[0] != -1)
@@ -233,7 +290,17 @@ static void run_pipeline(char ***argvs, int ncmd, int redirect_in, char *infile,
         }
 
         // parent
-        pids[i] = pid;
+        if (pgid == -1)
+        {
+            pgid = pid;
+            setpgid(pid, pgid);
+            tcsetpgrp(STDIN_FILENO, pgid);
+        }
+        else
+        {
+            setpgid(pid, pgid);
+        }
+
         if (prev_read != -1)
             close(prev_read);
 
@@ -247,10 +314,33 @@ static void run_pipeline(char ***argvs, int ncmd, int redirect_in, char *infile,
     if (prev_read != -1)
         close(prev_read);
 
-    for (int i = 0; i < ncmd; i++)
+    int stopped = 0;
+    int live = ncmd;
+
+    while (live > 0)
     {
         int st;
-        waitpid(pids[i], &st, 0);
+        pid_t w = waitpid(-pgid, &st, WUNTRACED);
+        if (w < 0)
+            break;
+
+        if (WIFSTOPPED(st))
+        {
+            stopped = 1;
+            break;
+        }
+
+        if (WIFEXITED(st) || WIFSIGNALED(st))
+        {
+            live--;
+        }
+    }
+
+    tcsetpgrp(STDIN_FILENO, shell_pgid);
+
+    if (stopped)
+    {
+        add_job(pgid, cmdline);
     }
 }
 
@@ -333,6 +423,86 @@ int main(void)
             break;
         }
 
+        if (strcmp(argv[0], "jobs") == 0)
+        {
+            if (argc != 1)
+            {
+                fprintf(stderr, "Error: invalid command\n");
+            }
+            else
+            {
+                for (int i = 0; i < jobs_n; i++)
+                {
+                    printf("[%d] %s\n", jobs[i].jid, jobs[i].cmdline);
+                }
+            }
+            free(argv);
+            free(line_copy);
+            continue;
+        }
+
+        if (strcmp(argv[0], "fg") == 0)
+        {
+            if (argc != 2)
+            {
+                fprintf(stderr, "Error: invalid command\n");
+                free(argv);
+                free(line_copy);
+                continue;
+            }
+
+            char *end = NULL;
+            long jid_l = strtol(argv[1], &end, 10);
+            if (!end || *end != '\0' || jid_l <= 0 || jid_l > 1000000)
+            {
+                fprintf(stderr, "Error: invalid command\n");
+                free(argv);
+                free(line_copy);
+                continue;
+            }
+
+            int idx = find_job_index((int)jid_l);
+            if (idx < 0)
+            {
+                fprintf(stderr, "Error: invalid command\n");
+                free(argv);
+                free(line_copy);
+                continue;
+            }
+
+            pid_t pgid = jobs[idx].pgid;
+            kill(-pgid, SIGCONT);
+
+            pid_t shell_pgid = getpgrp();
+            tcsetpgrp(STDIN_FILENO, pgid);
+
+            int st;
+            while (1)
+            {
+                pid_t w = waitpid(-pgid, &st, WUNTRACED);
+                if (w < 0)
+                {
+                    if (errno == EINTR)
+                        continue;
+                    break;
+                }
+                if (WIFSTOPPED(st))
+                {
+                    break;
+                }
+                if (WIFEXITED(st) || WIFSIGNALED(st))
+                {
+                    remove_job_index(idx);
+                    break;
+                }
+            }
+            tcsetpgrp(STDIN_FILENO, shell_pgid);
+
+            free(argv);
+            free(line_copy);
+            continue;
+        }
+
         int has_pipe = 0;
         for (int i = 0; i < argc; i++)
         {
@@ -360,7 +530,7 @@ int main(void)
                     fprintf(stderr, "Error: invalid command\n");
                     free(argv);
                     free(line_copy);
-                    continue;
+                    goto next_prompt;
                 }
             }
 
@@ -388,7 +558,7 @@ int main(void)
                 {
                     argv[i] = NULL;
                     if (i + 1 >= argc)
-                    { 
+                    {
                         fprintf(stderr, "Error: invalid command\n");
                         free(argv);
                         free(line_copy);
@@ -440,7 +610,7 @@ int main(void)
                     free(line_copy);
                     goto next_prompt;
                 }
-            
+
                 if (k != ncmd - 1 && Kout)
                 {
                     fprintf(stderr, "Error: invalid command\n");
@@ -462,7 +632,7 @@ int main(void)
                 }
             }
 
-            run_pipeline(argvs, ncmd, redirect_in, infile, redirect_out, append, outfile);
+            run_pipeline(argvs, ncmd, redirect_in, infile, redirect_out, append, outfile, line);
 
             free(argv);
             free(line_copy);
@@ -543,8 +713,18 @@ int main(void)
         else
         {
             // parent
-            int status = 0;
-            (void)waitpid(pid, &status, 0);
+            pid_t shell_pgid = getpgrp();
+            setpgid(pid, pid);
+            tcsetpgrp(STDIN_FILENO, pid);
+
+            int st;
+            waitpid(pid, &st, WUNTRACED);
+
+            tcsetpgrp(STDIN_FILENO, shell_pgid);
+            if (WIFSTOPPED(st))
+            {
+                add_job(pid, line);
+            }
         }
 
         free(prog);
