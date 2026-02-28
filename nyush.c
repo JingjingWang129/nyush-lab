@@ -141,117 +141,117 @@ static int is_builtin(const char *s)
     return s && (!strcmp(s, "cd") || !strcmp(s, "exit") || !strcmp(s, "jobs") || !strcmp(s, "fg"));
 }
 
-static int find_pipe(char **argv, int argc)
+static void run_pipeline(char ***argvs, int ncmd, int redirect_in, char *infile,
+                         int redirect_out, int append, char *outfile)
 {
-    for (int i = 0; i < argc; i++)
-    {
-        if (strcmp(argv[i], "|") == 0)
-            return i;
-    }
-    return -1;
-}
+    pid_t pids[512];
+    int prev_read = -1;
 
-static void exec_with_path(char **argv)
-{
-    char *prog = resolve_program(argv[0]);
-    if (!prog)
+    for (int i = 0; i < ncmd; i++)
     {
-        fprintf(stderr, "Error: invalid program\n");
-        _exit(1);
-    }
-    execv(prog, argv);
-    _exit(1);
-}
-
-static void run_single_pipe(char **argvL, char **argvR, int redirect_in, char *infile,
-                            int redirect_out, int append, char *outfile)
-{
-    int pfd[2];
-    if (pipe(pfd) < 0)
-    {
-        fprintf(stderr, "Error: invalid program\n");
-        return;
-    }
-
-    pid_t pid1 = fork();
-    if (pid1 < 0)
-    {
-        fprintf(stderr, "Error: invalid program\n");
-        close(pfd[0]);
-        close(pfd[1]);
-        return;
-    }
-    if (pid1 == 0)
-    {
-        // child
-        child_restore_signals();
-
-        if (redirect_in)
+        int pfd[2] = {-1, -1};
+        if (i != ncmd - 1)
         {
-            int fd = open(infile, O_RDONLY);
-            if (fd < 0)
+            if (pipe(pfd) < 0)
             {
-                fprintf(stderr, "Error: invalid file\n");
-                _exit(1);
+                fprintf(stderr, "Error: invalid program\n");
+                return;
             }
-            dup2(fd, STDIN_FILENO);
-            close(fd);
         }
 
-        dup2(pfd[1], STDOUT_FILENO);
+        pid_t pid = fork();
+        if (pid < 0)
+        {
+            fprintf(stderr, "Error: invalid program\n");
+            if (pfd[0] != -1)
+            {
+                close(pfd[0]);
+                close(pfd[1]);
+            }
+            return;
+        }
 
-        close(pfd[0]);
-        close(pfd[1]);
+        if (pid == 0)
+        {
+            child_restore_signals();
 
-        exec_with_path(argvL);
+            // stdin
+            if (i == 0 && redirect_in)
+            {
+                int fd = open(infile, O_RDONLY);
+                if (fd < 0)
+                {
+                    fprintf(stderr, "Error: invalid file\n");
+                    _exit(1);
+                }
+                dup2(fd, STDIN_FILENO);
+                close(fd);
+            }
+            else if (i > 0)
+            {
+                dup2(prev_read, STDIN_FILENO);
+            }
+
+            // stdout
+            if (i == ncmd - 1 && redirect_out)
+            {
+                int fd;
+                if (append)
+                    fd = open(outfile, O_WRONLY | O_CREAT | O_APPEND, 0644);
+                else
+                    fd = open(outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd < 0)
+                {
+                    fprintf(stderr, "Error: invalid file\n");
+                    _exit(1);
+                }
+                dup2(fd, STDOUT_FILENO);
+                close(fd);
+            }
+            else if (i != ncmd - 1)
+            {
+                dup2(pfd[1], STDOUT_FILENO);
+            }
+
+            // child
+            if (prev_read != -1)
+                close(prev_read);
+            if (pfd[0] != -1)
+                close(pfd[0]);
+            if (pfd[1] != -1)
+                close(pfd[1]);
+
+            // exec
+            char *prog = resolve_program(argvs[i][0]);
+            if (!prog)
+            {
+                fprintf(stderr, "Error: invalid program\n");
+                _exit(1);
+            }
+            execv(prog, argvs[i]);
+            _exit(1);
+        }
+
+        // parent
+        pids[i] = pid;
+        if (prev_read != -1)
+            close(prev_read);
+
+        if (i != ncmd - 1)
+        {
+            close(pfd[1]);
+            prev_read = pfd[0];
+        }
     }
 
-    pid_t pid2 = fork();
-    if (pid2 < 0)
+    if (prev_read != -1)
+        close(prev_read);
+
+    for (int i = 0; i < ncmd; i++)
     {
-        fprintf(stderr, "Error: invalid program\n");
-        close(pfd[0]);
-        close(pfd[1]);
         int st;
-        waitpid(pid1, &st, 0);
-        return;
+        waitpid(pids[i], &st, 0);
     }
-    if (pid2 == 0)
-    {
-        // child
-        child_restore_signals();
-
-        dup2(pfd[0], STDIN_FILENO);
-
-        if (redirect_out)
-        {
-            int fd;
-            if (append)
-                fd = open(outfile, O_WRONLY | O_CREAT | O_APPEND, 0644);
-            else
-                fd = open(outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd < 0)
-            {
-                fprintf(stderr, "Error: invalid file\n");
-                _exit(1);
-            }
-            dup2(fd, STDOUT_FILENO);
-            close(fd);
-        }
-
-        close(pfd[0]);
-        close(pfd[1]);
-
-        exec_with_path(argvR);
-    }
-
-    // parent
-    close(pfd[0]);
-    close(pfd[1]);
-
-    int st;
-    waitpid(pid1, &st, 0);
-    waitpid(pid2, &st, 0);
 }
 
 int main(void)
@@ -333,13 +333,29 @@ int main(void)
             break;
         }
 
-        int pipe_idx = find_pipe(argv, argc);
-
-        if (pipe_idx >= 0)
+        int has_pipe = 0;
+        for (int i = 0; i < argc; i++)
         {
-            for (int j = pipe_idx + 1; j < argc; j++)
+            if (!strcmp(argv[i], "|"))
             {
-                if (strcmp(argv[j], "|") == 0)
+                has_pipe = 1;
+                break;
+            }
+        }
+
+        if (has_pipe)
+        {
+            // no head，tail,  ||
+            if (!strcmp(argv[0], "|") || !strcmp(argv[argc - 1], "|"))
+            {
+                fprintf(stderr, "Error: invalid command\n");
+                free(argv);
+                free(line_copy);
+                continue;
+            }
+            for (int i = 0; i < argc - 1; i++)
+            {
+                if (!strcmp(argv[i], "|") && !strcmp(argv[i + 1], "|"))
                 {
                     fprintf(stderr, "Error: invalid command\n");
                     free(argv);
@@ -348,8 +364,12 @@ int main(void)
                 }
             }
 
-            // pipe cannot be head or tail
-            if (pipe_idx == 0 || pipe_idx == argc - 1)
+            // count cmds
+            int ncmd = 1;
+            for (int i = 0; i < argc; i++)
+                if (!strcmp(argv[i], "|"))
+                    ncmd++;
+            if (ncmd > 512)
             {
                 fprintf(stderr, "Error: invalid command\n");
                 free(argv);
@@ -357,48 +377,98 @@ int main(void)
                 continue;
             }
 
-            argv[pipe_idx] = NULL;
-            char **argvL = argv;
-            int argcL = pipe_idx;
-            char **argvR = &argv[pipe_idx + 1];
-            int argcR = argc - pipe_idx - 1;
+            // split，replace |
+            char **argvs[512];
+            int idx = 0;
+            argvs[idx++] = argv;
 
-            // builtin cannot be piped
-            if (is_builtin(argvL[0]) || is_builtin(argvR[0]))
+            for (int i = 0; i < argc; i++)
             {
-                fprintf(stderr, "Error: invalid command\n");
-                free(argv);
-                free(line_copy);
-                continue;
+                if (!strcmp(argv[i], "|"))
+                {
+                    argv[i] = NULL;
+                    if (i + 1 >= argc)
+                    { 
+                        fprintf(stderr, "Error: invalid command\n");
+                        free(argv);
+                        free(line_copy);
+                        goto next_prompt;
+                    }
+                    argvs[idx++] = &argv[i + 1];
+                }
             }
 
-            // parse redirections
-            int Lin = 0, Lout = 0, Lapp = 0;
-            char *Linf = NULL, *Loutf = NULL;
-            int Rin = 0, Rout = 0, Rapp = 0;
-            char *Rinf = NULL, *Routf = NULL;
+            int redirect_in = 0, redirect_out = 0, append = 0;
+            char *infile = NULL, *outfile = NULL;
 
-            if (parse_redirections(argvL, &argcL, &Lin, &Linf, &Lout, &Lapp, &Loutf) < 0 ||
-                parse_redirections(argvR, &argcR, &Rin, &Rinf, &Rout, &Rapp, &Routf) < 0)
+            for (int k = 0; k < ncmd; k++)
             {
-                fprintf(stderr, "Error: invalid command\n");
-                free(argv);
-                free(line_copy);
-                continue;
+                if (argvs[k][0] == NULL)
+                {
+                    fprintf(stderr, "Error: invalid command\n");
+                    free(argv);
+                    free(line_copy);
+                    goto next_prompt;
+                }
+                if (is_builtin(argvs[k][0]))
+                {
+                    fprintf(stderr, "Error: invalid command\n");
+                    free(argv);
+                    free(line_copy);
+                    goto next_prompt;
+                }
+
+                int argc_k = 0;
+                while (argvs[k][argc_k] != NULL)
+                    argc_k++;
+
+                int Kin = 0, Kout = 0, Kapp = 0;
+                char *Kinf = NULL, *Koutf = NULL;
+
+                if (parse_redirections(argvs[k], &argc_k, &Kin, &Kinf, &Kout, &Kapp, &Koutf) < 0)
+                {
+                    fprintf(stderr, "Error: invalid command\n");
+                    free(argv);
+                    free(line_copy);
+                    goto next_prompt;
+                }
+
+                if (k != 0 && Kin)
+                {
+                    fprintf(stderr, "Error: invalid command\n");
+                    free(argv);
+                    free(line_copy);
+                    goto next_prompt;
+                }
+            
+                if (k != ncmd - 1 && Kout)
+                {
+                    fprintf(stderr, "Error: invalid command\n");
+                    free(argv);
+                    free(line_copy);
+                    goto next_prompt;
+                }
+
+                if (k == 0 && Kin)
+                {
+                    redirect_in = 1;
+                    infile = Kinf;
+                }
+                if (k == ncmd - 1 && Kout)
+                {
+                    redirect_out = 1;
+                    append = Kapp;
+                    outfile = Koutf;
+                }
             }
 
-            if (Lout || Rin)
-            {
-                fprintf(stderr, "Error: invalid command\n");
-                free(argv);
-                free(line_copy);
-                continue;
-            }
-
-            run_single_pipe(argvL, argvR, Lin, Linf, Rout, Rapp, Routf);
+            run_pipeline(argvs, ncmd, redirect_in, infile, redirect_out, append, outfile);
 
             free(argv);
             free(line_copy);
+            continue;
+
+        next_prompt:
             continue;
         }
 
